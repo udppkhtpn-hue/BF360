@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>AcuitySync - Patient Flow & Bed Management</title>
+    
+    <!-- React 18, ReactDOM 18, Babel Standalone, Tailwind CSS, jsQR -->
+    <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    
+    <!-- Google Material Symbols Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
+    
+    <style>
+      body { overscroll-behavior-y: contain; }
+      .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+      const { useState, useEffect, useRef } = React;
+      
+      // Default Google Apps Script URL for instant cloud sync
+      const DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbwG32CjKGE01avwzL4g6-19dWKGSP9-_cA42l6YQmnZmGLbCGLQP9_S_r_qX1mA4lg2Pw/exec';
+
+      // Safe LocalStorage helpers
+      const getLocal = (key, defaultVal) => { try { return localStorage.getItem(key) || defaultVal; } catch(e) { return defaultVal; } };
+      const setLocal = (key, val) => { try { localStorage.setItem(key, val); } catch(e) {} };
+      const getLocalJSON = (key, defaultVal) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : defaultVal; } catch(e) { return defaultVal; } };
+      const setLocalJSON = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} };
+
+      const Icon = ({ name, className = '' }) => {
+        let style = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center' };
+        const sizeMatch = className.match(/w-([0-9.]+)/);
+        if (sizeMatch) style.fontSize = `${parseFloat(sizeMatch[1]) * 4}px`;
+        return <span className={`material-symbols-outlined flex-shrink-0 ${className}`} style={style}>{name}</span>;
+      };
+
+      const Activity = (p) => <Icon name="monitor_heart" {...p} />;
+      const Users = (p) => <Icon name="group" {...p} />;
+      const Bed = (p) => <Icon name="bed" {...p} />;
+      const AlertCircle = (p) => <Icon name="error" {...p} />;
+      const ArrowRight = (p) => <Icon name="arrow_forward" {...p} />;
+      const Plus = (p) => <Icon name="add" {...p} />;
+      const ActivitySquare = (p) => <Icon name="health_and_safety" {...p} />;
+      const QrCode = (p) => <Icon name="qr_code_2" {...p} />;
+      const ScanLine = (p) => <Icon name="document_scanner" {...p} />;
+      const LogOut = (p) => <Icon name="logout" {...p} />;
+      const CheckCircle = (p) => <Icon name="check_circle" {...p} />;
+      const Search = (p) => <Icon name="search" {...p} />;
+      const Clock = (p) => <Icon name="schedule" {...p} />;
+      const FileText = (p) => <Icon name="description" {...p} />;
+      const ClipboardEdit = (p) => <Icon name="edit_document" {...p} />;
+      const Camera = (p) => <Icon name="photo_camera" {...p} />;
+
+      const getAcuityDetails = (score) => {
+        const num = parseInt(score, 10);
+        if (isNaN(num)) return { category: 'Unassessed', color: 'bg-gray-500', text: 'text-gray-800', bg: 'bg-gray-100', ratio: 'N/A' };
+        if (num >= 34) return { category: 'High-Risk', color: 'bg-red-500', text: 'text-red-800', bg: 'bg-red-100', ratio: '2 Nurses : 1 Patient' };
+        if (num >= 23) return { category: 'Complex', color: 'bg-orange-500', text: 'text-orange-800', bg: 'bg-orange-100', ratio: '1 Nurse : 1 Patient' };
+        if (num >= 12) return { category: 'Moderate Risk', color: 'bg-yellow-500', text: 'text-yellow-800', bg: 'bg-yellow-100', ratio: '1 Nurse : 2 Patients' };
+        return { category: 'Stable', color: 'bg-green-500', text: 'text-green-800', bg: 'bg-green-100', ratio: '1 Nurse : 4 Patients' };
+      };
+
+      const STAGES = [
+        "Registered", "Clinical Area Arrival", "Referred to Primary Team", 
+        "Primary Team Assessed", "Decision to Admit", "Ward Arrival", 
+        "Ward Update (Acuity/Daily)", "Discharged"
+      ];
+
+      const ACUITY_CRITERIA = [
+        { name: "Assessment/Vitals", options: [{ text: "Q4H Vitals / Alert", desc: "Q4H Vitals, Alert and oriented" }, { text: "Q2H Vitals / Altered MEWS", desc: "Q2H Vitals with altered MEWS score" }, { text: "Q2H Vitals / Delirium", desc: "Q2H Vitals, Delirium/altered mental status" }, { text: "Unstable Vitals", desc: "Unstable Vitals (determined by ordered parameters)" }] },
+        { name: "Respiratory", options: [{ text: "Stable on room air", desc: "Stable on room air" }, { text: "O2 < 2L via NC", desc: "Oxygen < 2L via Nasal Cannula" }, { text: "O2 > 2L via NC / Trach", desc: "Oxygen > 2L via Nasal Cannula, or Tracheostomy" }, { text: "Oxygen mask / Secretions", desc: "Oxygen via mask, or cannot maintain secretions independently" }] },
+        { name: "Pain Management", options: [{ text: "Well managed (Q4H)", desc: "Pain well managed with PO or IV medication every 4 hr" }, { text: "PCA / Nausea & Vomiting", desc: "Patient-controlled analgesia/nerve block, or Nausea/Vomiting" }, { text: "Q2H Pain management", desc: "Requires Q2H Pain management" }, { text: "Uncontrolled / Multiple devices", desc: "Uncontrolled pain with multiple pain devices (IV, Patch, Epidural, etc.)" }] },
+        { name: "Complicated Procedures", options: [{ text: "Routine care / Bloods", desc: "Naso Gastric tube feeding, Rectal tube/ostomy, Routine blood sampling" }, { text: "Moderate care / Restraints", desc: "Turn Q2/incontinent, Restraints, Pre-operative care, Wound care" }, { text: "Hemodynamic instability / Active proc.", desc: "Hemodynamic instability, Bleeding precautions, Active bedside procedures" }, { text: "Ventilated / Severe shock", desc: "Ventilated (High FiO2/PEEP), Severe shock state, Post code first 12 hr" }] },
+        { name: "IV Medications", options: [{ text: "Routine POCT", desc: "POCT, Blood glucose normal" }, { text: "TPN / Routine bloods", desc: "TPN, PEG feed, Routine/stable blood products, Routine electrolytes" }, { text: "Freq. electrolytes / Dialysis", desc: "Frequent concentrated electrolytes (>2), 1 unit blood, Heparin, Dialysis" }, { text: "Thrombolytics / Critical bloods", desc: "Thrombolytic therapy, Multiple/critical blood products (>3), Chemo administration" }] },
+        { name: "Education/Support", options: [{ text: "Standard", desc: "Discharge today, Pre/Post-procedure standard care" }, { text: "New meds / Comm. barrier", desc: "New meds/side effects, Inability to comprehend, Communication barrier" }, { text: "Multiple comorbidities (>3)", desc: "Multiple comorbidities, > 3 consults on the case, New Diagnosis" }, { text: "End-of-life care", desc: "End-of-life care requiring high support" }] },
+        { name: "Isolation/Mobility", options: [{ text: "Independent ADLs", desc: "Independent in ADLS, Standard precaution" }, { text: "Assist ADLs / Standard Iso", desc: "Assist with ADLs, Isolation (Contact, Enteric)" }, { text: "Bed rest / Turns Q2H", desc: "Turns Q2H, Bed rest, Respiratory Isolation" }, { text: "Total care / Lifts", desc: "Paraplegic or quadriplegic, Total care (lifts)" }] },
+        { name: "Admit/Discharge/Transfer", options: [{ text: "Routine", desc: "Stable transfer, Routine Discharge" }, { text: "New Admit / Complex DC", desc: "New admission, Complex discharge" }, { text: "Complicated Post-op", desc: "Complicated post-operative cases" }, { text: "Transfer to higher care", desc: "Transfer to higher level care (e.g., ICU)" }] },
+        { name: "Safety/Vulnerability", options: [{ text: "No Risk", desc: "No specific vulnerability risk" }, { text: "Sensory deficits", desc: "Sensory deficits (Visually or Hearing impaired, etc.)" }, { text: "High risk (Fall, DVT)", desc: "High-risk patient with vulnerability to Fall, Pressure ulcer, DVT" }, { text: "Highly agitated", desc: "Highly agitated, requires Restraints" }] },
+        { name: "Wound/Continence", options: [{ text: "Routine dressing", desc: "QD/BID dressing, One-person assist to bathroom/bedpan" }, { text: "Ostomy / Enema", desc: "Ostomy/rectal tube, Enema, Bowel preparation" }, { text: "Complex dressing / Vacs", desc: "TID/complex dressing by RN, High output ostomy, Multiple wound vacs" }, { text: "Active drainage (> TID)", desc: "Active drainage change >30 min or > TID, Q1H toilet needs" }] },
+        { name: "Med Administration", options: [{ text: "1-2 medicines", desc: "Patient receiving one to two medicines" }, { text: ">2 medicines & IV", desc: "Patient receiving two and more medicines and IV infusion" }, { text: "High-end antibiotics", desc: "Patient receiving high-end antibiotic and multiple infusions" }, { text: "Chemo / High-alert meds", desc: "Chemo and High alert medication, Highly concentrated medicines" }] }
+      ];
+
+      function App() {
+        const [staffId, setStaffId] = useState(() => getLocal('acuity_staffId', ''));
+        const [pin, setPin] = useState('');
+        const [isLoggedIn, setIsLoggedIn] = useState(() => getLocal('acuity_isLoggedIn', 'false') === 'true');
+        const [view, setView] = useState(() => getLocal('acuity_view', 'register')); 
+        const [gasApiUrl, setGasApiUrl] = useState(() => getLocal('acuity_gasUrl', DEFAULT_API_URL));
+
+        const [patients, setPatients] = useState(() => getLocalJSON('acuity_patients', []));
+        const [wardBeds, setWardBeds] = useState(() => getLocalJSON('acuity_wardBeds', { total: 50, occupied: 0 }));
+        
+        const [newPatient, setNewPatient] = useState({ name: '', ic: '', age: '', race: '', gender: '' });
+        const [generatedQR, setGeneratedQR] = useState(null);
+
+        const [scannedPatientIC, setScannedPatientIC] = useState('');
+        const [activeLogPatient, setActiveLogPatient] = useState(null);
+        const [logForm, setLogForm] = useState({ stage: '', score: '', details: '' });
+        
+        const [showCalculator, setShowCalculator] = useState(false);
+        const [acuitySelections, setAcuitySelections] = useState(Array(11).fill(1));
+        const [calcStep, setCalcStep] = useState(0); 
+        const [currentTime, setCurrentTime] = useState(Date.now());
+        const [scannerLoaded, setScannerLoaded] = useState(false);
+        const [isScanningImage, setIsScanningImage] = useState(false);
+        
+        const [toastMsg, setToastMsg] = useState(null);
+        const toastTimerRef = useRef(null);
+        const fileInputRef = useRef(null);
+        const patientsRef = useRef(patients);
+
+        useEffect(() => setLocal('acuity_staffId', staffId), [staffId]);
+        useEffect(() => setLocal('acuity_isLoggedIn', isLoggedIn.toString()), [isLoggedIn]);
+        useEffect(() => setLocal('acuity_view', view), [view]);
+        useEffect(() => setLocal('acuity_gasUrl', gasApiUrl), [gasApiUrl]);
+        useEffect(() => setLocalJSON('acuity_patients', patients), [patients]);
+        useEffect(() => setLocalJSON('acuity_wardBeds', wardBeds), [wardBeds]);
+        useEffect(() => { patientsRef.current = patients; }, [patients]);
+
+        const showToast = (msg, type = 'error') => {
+          setToastMsg({ text: msg, type });
+          if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+          toastTimerRef.current = setTimeout(() => setToastMsg(null), 6000);
+        };
+
+        const activeApiUrl = gasApiUrl || DEFAULT_API_URL;
+
+        // Fetch initial data from Google Sheets
+        useEffect(() => {
+          if (typeof google !== 'undefined' && google.script) {
+            google.script.run.withSuccessHandler((data) => {
+              if (data && data.patients) {
+                setPatients(data.patients.map(p => ({ ...p, history: p.history || [] })));
+                if (data.wardBeds) setWardBeds(data.wardBeds);
+              }
+            }).getInitialData();
+          } else if (activeApiUrl) {
+            fetch(`${activeApiUrl}?action=getInitialData`)
+              .then(res => res.json())
+              .then(data => {
+                if (data && data.patients) {
+                  setPatients(data.patients.map(p => ({ ...p, history: p.history || [] })));
+                  if (data.wardBeds) setWardBeds(data.wardBeds);
+                }
+              })
+              .catch(err => console.log("Cloud initial fetch error:", err));
+          }
+        }, [activeApiUrl]);
+
+        useEffect(() => {
+          if (window.jsQR) { setScannerLoaded(true); return; }
+          const checkScanner = setInterval(() => {
+            if (window.jsQR) { setScannerLoaded(true); clearInterval(checkScanner); }
+          }, 200);
+          return () => clearInterval(checkScanner);
+        }, []);
+
+        useEffect(() => {
+          const timer = setInterval(() => setCurrentTime(Date.now()), 60000); 
+          return () => clearInterval(timer);
+        }, []);
+
+        useEffect(() => {
+          if (showCalculator) {
+            const total = acuitySelections.reduce((a, b) => a + b, 0);
+            setLogForm(prev => ({ ...prev, score: total }));
+          }
+        }, [acuitySelections, showCalculator]);
+
+        const handleIcChange = (e) => {
+          const icValue = e.target.value;
+          let updatedPatient = { ...newPatient, ic: icValue };
+          const cleanIc = icValue.replace(/\D/g, '');
+
+          if (cleanIc.length === 12) {
+            const lastDigit = parseInt(cleanIc.charAt(11), 10);
+            updatedPatient.gender = lastDigit % 2 === 0 ? 'Female' : 'Male';
+
+            const yearStr = parseInt(cleanIc.substring(0, 2), 10);
+            const month = parseInt(cleanIc.substring(2, 4), 10);
+            const day = parseInt(cleanIc.substring(4, 6), 10);
+
+            const today = new Date();
+            const currentYear = today.getFullYear();
+            const currentYear2Digits = currentYear % 100;
+            const birthYear = yearStr > currentYear2Digits ? 1900 + yearStr : 2000 + yearStr;
+            
+            let calculatedAge = currentYear - birthYear;
+            if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) {
+              calculatedAge--;
+            }
+            updatedPatient.age = calculatedAge.toString();
+          }
+          setNewPatient(updatedPatient);
+        };
+
+        const handleLogin = (e) => {
+          e.preventDefault();
+          const idUpper = staffId.trim().toUpperCase();
+          const isValidId = /^(HKJG|HTPN)\d{3,4}$/.test(idUpper);
+          const isValidPin = /^\d{4,6}$/.test(pin);
+          
+          if (!isValidId) {
+            showToast("Invalid Staff ID format. Must start with HKJG or HTPN followed by 3-4 digits.");
+            return;
+          }
+          if (!isValidPin) {
+            showToast("Invalid PIN. Please enter your 4 to 6 digit PIN.");
+            return;
+          }
+
+          if (typeof google !== 'undefined' && google.script) {
+            google.script.run
+              .withSuccessHandler((isValid) => {
+                if (isValid) { setStaffId(idUpper); setIsLoggedIn(true); } 
+                else { showToast("Access Denied: ID and PIN do not match StaffDirectory."); }
+              })
+              .withFailureHandler(err => showToast("Auth Error: " + err.message))
+              .verifyStaffLogin(idUpper, pin);
+          } else if (activeApiUrl) {
+            fetch(`${activeApiUrl}?action=verifyStaffLogin&staffId=${encodeURIComponent(idUpper)}&pin=${encodeURIComponent(pin)}`)
+              .then(res => res.json())
+              .then(data => {
+                if (data && data.isValid) {
+                  setStaffId(idUpper);
+                  setIsLoggedIn(true);
+                } else {
+                  showToast("Access Denied: ID and PIN do not match StaffDirectory.");
+                }
+              })
+              .catch(err => {
+                setStaffId(idUpper);
+                setIsLoggedIn(true);
+              });
+          } else {
+            setStaffId(idUpper);
+            setIsLoggedIn(true);
+          }
+        };
+
+        const handleLogout = () => { setIsLoggedIn(false); setPin(''); };
+
+        const syncToCloud = (patientData, logEntry) => {
+          if (typeof google !== 'undefined' && google.script) {
+            google.script.run.syncPatientData(patientData, logEntry);
+          } else if (activeApiUrl) {
+            fetch(activeApiUrl, {
+              method: 'POST',
+              mode: 'no-cors',
+              headers: { 'Content-Type': 'text/plain' },
+              body: JSON.stringify({ action: 'syncPatientData', patientObj: patientData, logEntry: logEntry })
+            }).catch(err => console.error("Cloud sync error:", err));
+          }
+        };
+
+        const handleRegister = (e) => {
+          e.preventDefault();
+          const timestamp = new Date().toISOString();
+          
+          const qrPayload = JSON.stringify({
+            i: newPatient.ic,
+            n: newPatient.name,
+            a: newPatient.age,
+            g: newPatient.gender,
+            r: newPatient.race,
+            t: timestamp
+          });
+          
+          const newEntry = {
+            ...newPatient,
+            currentStage: 'Registered',
+            currentScore: null,
+            regTime: timestamp,
+            history: [{ stage: 'Registered', score: null, timestamp, staffId, details: 'Registered at Unit Hasil' }]
+          };
+
+          setPatients([...patients, newEntry]);
+          setGeneratedQR(`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrPayload)}`);
+
+          const logEntry = { ic: newPatient.ic, stage: 'Registered', score: '', details: 'Registered at Unit Hasil', staffId: staffId };
+          syncToCloud(newEntry, logEntry);
+        };
+
+        const lookupPatient = (icString, currentPatients = patients, qrPayload = null) => {
+          const cleanScanned = String(icString).replace(/[^a-zA-Z0-9]/g, '');
+          let pt = currentPatients.find(p => p.ic && String(p.ic).replace(/[^a-zA-Z0-9]/g, '') === cleanScanned);
+          
+          if (!pt && qrPayload && (qrPayload.n || qrPayload.name)) {
+            pt = {
+              name: qrPayload.n || qrPayload.name,
+              ic: cleanScanned,
+              age: qrPayload.a || qrPayload.age || '',
+              gender: qrPayload.g || qrPayload.gender || '',
+              race: qrPayload.r || qrPayload.race || '',
+              currentStage: 'Clinical Area Arrival',
+              currentScore: null,
+              regTime: qrPayload.t || new Date().toISOString(),
+              history: [{ stage: 'Clinical Area Arrival', score: null, timestamp: new Date().toISOString(), staffId: staffId || 'QR-SCAN', details: 'Scanned at Clinical Area' }]
+            };
+            setPatients(prev => [...prev, pt]);
+            const logEntry = { ic: cleanScanned, stage: 'Clinical Area Arrival', score: '', details: 'Scanned & Checked In via QR', staffId: staffId || 'QR-SCAN' };
+            syncToCloud(pt, logEntry);
+          }
+
+          if (pt) {
+            setActiveLogPatient(pt);
+            const currentIndex = STAGES.indexOf(pt.currentStage);
+            const nextStage = currentIndex < STAGES.length - 1 && pt.currentStage !== 'Ward Update (Acuity/Daily)' 
+              ? STAGES[currentIndex + 1] 
+              : STAGES[STAGES.length - 2]; 
+            
+            setLogForm({ stage: nextStage, score: pt.currentScore || '', details: '' });
+            setView('clinical_log');
+            showToast(`Matched Patient: ${pt.name}`, 'success');
+          } else {
+            showToast(`Patient IC (${cleanScanned}) not found. Please register or scan full data QR.`);
+          }
+        };
+
+        const simulateScan = (e) => {
+          e.preventDefault();
+          if (!scannedPatientIC) return showToast("Please enter an IC number.");
+          lookupPatient(scannedPatientIC);
+        };
+
+        const handleFileUpload = async (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+
+          setIsScanningImage(true);
+
+          try {
+            const img = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                const i = new Image();
+                i.onload = () => resolve(i);
+                i.onerror = () => reject(new Error("Image rendering failed."));
+                i.src = event.target.result;
+              };
+              reader.onerror = () => reject(new Error("File reading failed."));
+              reader.readAsDataURL(file); 
+            });
+
+            let decodedText = null;
+
+            if ('BarcodeDetector' in window) {
+              try {
+                const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+                const barcodes = await detector.detect(img);
+                if (barcodes.length > 0) decodedText = barcodes[0].rawValue;
+              } catch(err) {}
+            }
+
+            if (!decodedText && window.jsQR) {
+              const canvas = document.createElement('canvas');
+              const MAX_DIM = 1000;
+              let width = img.width;
+              let height = img.height;
+              if (width > MAX_DIM || height > MAX_DIM) {
+                const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
+                width = width * ratio;
+                height = height * ratio;
+              }
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d', { willReadFrequently: true });
+              ctx.drawImage(img, 0, 0, width, height);
+              const imageData = ctx.getImageData(0, 0, width, height);
+              
+              const code = window.jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" });
+              if (code) decodedText = code.data;
+            }
+
+            if (decodedText) {
+              let extractedIC = null;
+              let qrPayload = null;
+              try {
+                qrPayload = JSON.parse(decodedText);
+                extractedIC = qrPayload.ic || qrPayload.i;
+              } catch (err) {
+                const match = decodedText.match(/\d{12}/);
+                if (match) extractedIC = match[0];
+              }
+
+              if (extractedIC) {
+                lookupPatient(extractedIC, patientsRef.current, qrPayload);
+              } else {
+                showToast(`QR detected, but no IC found. Content: ${decodedText}`);
+              }
+            } else {
+              showToast("Could not read QR code. Please try again or use manual IC lookup.");
+            }
+          } catch (err) {
+            showToast("Scanner Error: " + (err.message || "Failed to process photo"));
+          } finally {
+            setIsScanningImage(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+          }
+        };
+
+        const submitClinicalLog = (e) => {
+          e.preventDefault();
+          const timestamp = new Date().toISOString();
+          
+          const newLog = {
+            stage: logForm.stage,
+            score: parseInt(logForm.score, 10),
+            timestamp,
+            staffId,
+            details: logForm.details
+          };
+
+          const updatedPatient = {
+            ...activeLogPatient,
+            currentStage: logForm.stage,
+            currentScore: newLog.score,
+            history: [...activeLogPatient.history, newLog]
+          };
+
+          if (logForm.stage === 'Ward Arrival' && activeLogPatient.currentStage !== 'Ward Arrival' && activeLogPatient.currentStage !== 'Ward Update (Acuity/Daily)') {
+            setWardBeds(prev => ({ ...prev, occupied: prev.occupied + 1 }));
+          } else if (logForm.stage === 'Discharged') {
+            if (activeLogPatient.currentStage === 'Ward Arrival' || activeLogPatient.currentStage === 'Ward Update (Acuity/Daily)') {
+              setWardBeds(prev => ({ ...prev, occupied: Math.max(0, prev.occupied - 1) }));
+            }
+          }
+
+          setPatients(patients.map(p => String(p.ic) === String(updatedPatient.ic) ? updatedPatient : p));
+          setActiveLogPatient(null);
+          setScannedPatientIC('');
+          setView('scan'); 
+          showToast("Clinical Log submitted successfully.", "success");
+
+          const logEntry = { ic: updatedPatient.ic, stage: logForm.stage, score: logForm.score || '', details: logForm.details, staffId: staffId };
+          syncToCloud(updatedPatient, logEntry);
+        };
+
+        return (
+          <div className="min-h-screen bg-gray-50 text-gray-900 font-sans pb-10 relative">
+            
+            {toastMsg && (
+              <div className={`fixed top-4 right-4 left-4 md:left-auto z-50 p-4 rounded-lg shadow-2xl font-medium text-sm flex items-start md:max-w-md ${toastMsg.type === 'error' ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'}`}>
+                {toastMsg.type === 'error' ? <AlertCircle className="w-5 h-5 mr-3 flex-shrink-0 mt-0.5" /> : <CheckCircle className="w-5 h-5 mr-3 flex-shrink-0 mt-0.5" />}
+                <div>
+                  <h4 className="font-bold mb-0.5">{toastMsg.type === 'error' ? 'Action Failed' : 'Success'}</h4>
+                  <p className="opacity-90 leading-relaxed">{toastMsg.text}</p>
+                </div>
+              </div>
+            )}
+
+            {!isLoggedIn ? (
+              <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+                <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full border-t-4 border-indigo-600">
+                  <div className="flex items-center justify-center mb-6 text-indigo-600">
+                    <ActivitySquare className="w-12 h-12" />
+                  </div>
+                  <h2 className="text-2xl font-bold text-center text-gray-800 mb-2">MOH Secure Login</h2>
+                  <p className="text-center text-sm text-gray-500 mb-6">Secondary Staff Verification Required</p>
+                  <form onSubmit={handleLogin} className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">MOH Staff ID</label>
+                      <input type="text" required value={staffId} onChange={e => setStaffId(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="e.g. HKJG123 or HTPN1234" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Personal PIN</label>
+                      <input type="password" required value={pin} onChange={e => setPin(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none tracking-widest" placeholder="••••" maxLength="6" />
+                    </div>
+                    <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-md transition shadow-sm">
+                      Authenticate & Enter
+                    </button>
+                  </form>
+                </div>
+              </div>
+            ) : (
+              <>
+                <nav className="bg-indigo-700 text-white shadow-md sticky top-0 z-10">
+                  <div className="max-w-7xl mx-auto px-4 py-2 flex flex-col md:flex-row md:justify-between md:items-center">
+                    <div className="flex justify-between items-center w-full md:w-auto mb-3 md:mb-0">
+                      <div className="flex items-center space-x-2">
+                        <ActivitySquare className="h-6 w-6 text-indigo-200" />
+                        <span className="font-bold text-lg tracking-wide">AcuitySync QR</span>
+                      </div>
+                      <div className="md:hidden flex items-center text-xs text-indigo-200">
+                        ID: {staffId}
+                      </div>
+                    </div>
+                    
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button onClick={() => setView('register')} className={`flex items-center px-3 py-1.5 rounded-md font-medium text-sm transition ${view === 'register' ? 'bg-indigo-800 shadow-inner text-white' : 'text-indigo-100 hover:bg-indigo-600'}`}>
+                        <FileText className="w-4 h-4 mr-1.5" /> Registration
+                      </button>
+                      <button onClick={() => setView('scan')} className={`flex items-center px-3 py-1.5 rounded-md font-medium text-sm transition ${view === 'scan' ? 'bg-indigo-800 shadow-inner text-white' : 'text-indigo-100 hover:bg-indigo-600'}`}>
+                        <ScanLine className="w-4 h-4 mr-1.5" /> Scanner
+                      </button>
+                      <button onClick={() => setView('clinical_log')} className={`flex items-center px-3 py-1.5 rounded-md font-medium text-sm transition ${view === 'clinical_log' ? 'bg-indigo-800 shadow-inner text-white' : 'text-indigo-100 hover:bg-indigo-600'}`}>
+                        <ClipboardEdit className="w-4 h-4 mr-1.5" /> Clinical Log
+                      </button>
+                      <button onClick={() => setView('dashboard')} className={`flex items-center px-3 py-1.5 rounded-md font-medium text-sm transition ${view === 'dashboard' ? 'bg-indigo-800 shadow-inner text-white' : 'text-indigo-100 hover:bg-indigo-600'}`}>
+                        <Activity className="w-4 h-4 mr-1.5" /> Bed Board
+                      </button>
+                      <div className="hidden md:flex items-center ml-4 pl-4 border-l border-indigo-500 text-xs text-indigo-100">
+                        Staff: {staffId}
+                        <button onClick={handleLogout} className="ml-3 hover:text-white" title="Logout"><LogOut className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                  </div>
+                </nav>
+
+                <main className="max-w-7xl mx-auto px-4 py-6 md:py-8">
+                  {view === 'scan' && (
+                    <div className="max-w-md mx-auto space-y-6">
+                      <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                        <div className="text-center mb-6">
+                          <div className="inline-block p-4 bg-indigo-50 rounded-full mb-3 text-indigo-600">
+                            <Camera className="w-10 h-10" />
+                          </div>
+                          <h2 className="text-xl font-bold text-gray-800">Scan Patient QR</h2>
+                          <p className="text-sm text-gray-500 mt-1">Use phone camera to scan patient wristband</p>
+                        </div>
+                        
+                        <div className="w-full mx-auto rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50 flex flex-col items-center justify-center p-8 mb-6 relative">
+                          {!scannerLoaded ? (
+                            <div className="text-indigo-600 text-sm font-medium animate-pulse">Loading scanner modules...</div>
+                          ) : isScanningImage ? (
+                             <div className="flex flex-col items-center text-indigo-700">
+                               <Activity className="w-10 h-10 animate-spin mb-3" />
+                               <p className="font-bold">Analyzing QR Code...</p>
+                             </div>
+                          ) : (
+                            <>
+                              <QrCode className="w-16 h-16 text-indigo-300 mb-4" />
+                              <button
+                                type="button"
+                                onClick={() => fileInputRef.current.click()}
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-full shadow-lg transition flex items-center text-lg w-full justify-center"
+                              >
+                                <Camera className="w-6 h-6 mr-3" /> Tap to Scan
+                              </button>
+                              
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                ref={fileInputRef}
+                                onChange={handleFileUpload}
+                                className="hidden"
+                              />
+                            </>
+                          )}
+                        </div>
+                        
+                        <form onSubmit={simulateScan} className="border-t pt-5 border-gray-100">
+                          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Manual Entry / Fallback (Enter IC):</label>
+                          <div className="flex space-x-2">
+                            <input type="text" value={scannedPatientIC} onChange={e => setScannedPatientIC(e.target.value)} placeholder="Enter patient IC..." className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                            <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition flex items-center shadow-sm">
+                              <Search className="w-4 h-4 mr-1"/> Lookup
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+
+                  {view === 'clinical_log' && (
+                    !activeLogPatient ? (
+                      <div className="max-w-md mx-auto bg-white p-8 rounded-xl shadow-sm border border-gray-200 flex flex-col items-center text-center">
+                        <ClipboardEdit className="w-16 h-16 text-gray-300 mb-4" />
+                        <h2 className="text-xl font-bold text-gray-700 mb-2">No Active Patient</h2>
+                        <p className="text-gray-500 text-sm mb-6">Scan a patient's QR code to update clinical logs.</p>
+                        <button onClick={() => setView('scan')} className="bg-indigo-600 text-white px-6 py-2 rounded-md font-medium hover:bg-indigo-700 transition shadow-sm">
+                          Go to Scanner
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="max-w-md mx-auto space-y-6">
+                        <div className="bg-white rounded-xl shadow-lg border border-gray-200">
+                          <div className="bg-indigo-700 p-4 text-white flex justify-between items-start rounded-t-xl">
+                            <div>
+                              <h3 className="font-bold text-lg">{activeLogPatient.name}</h3>
+                              <p className="text-indigo-200 text-sm font-mono">{activeLogPatient.ic} • {activeLogPatient.age}y • {activeLogPatient.race}</p>
+                              
+                              <div className="mt-3 bg-indigo-800/50 p-2.5 rounded-md inline-block border border-indigo-600/50 shadow-inner">
+                                <p className="text-xs text-indigo-100 flex items-center mb-1">
+                                  <Clock className="w-3 h-3 mr-1.5" /> 
+                                  Admitted: {new Date(activeLogPatient.regTime).toLocaleDateString()} at {new Date(activeLogPatient.regTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </p>
+                                <p className="text-sm font-bold text-white flex items-center">
+                                  <Activity className="w-3.5 h-3.5 mr-1.5" />
+                                  Elapsed Time: {Math.floor((currentTime - new Date(activeLogPatient.regTime).getTime()) / 60000)} minutes
+                                </p>
+                              </div>
+                            </div>
+                            <button onClick={() => {setActiveLogPatient(null); setView('scan');}} className="text-indigo-200 hover:text-white"><LogOut className="w-5 h-5"/></button>
+                          </div>
+                          
+                          <div className="p-5">
+                             <div className="mb-5 bg-gray-50 p-3 rounded-lg border border-gray-100 flex items-center justify-between">
+                               <div>
+                                 <span className="text-xs text-gray-500 uppercase font-bold tracking-wide">Current Status</span>
+                                 <p className="font-medium text-gray-800">{activeLogPatient.currentStage}</p>
+                               </div>
+                               {activeLogPatient.currentScore && (
+                                 <div className="text-right">
+                                   <span className="text-xs text-gray-500 uppercase font-bold tracking-wide">Last Acuity</span>
+                                   <p className={`text-sm font-bold px-2 py-0.5 rounded-full mt-0.5 ${getAcuityDetails(activeLogPatient.currentScore).bg} ${getAcuityDetails(activeLogPatient.currentScore).text}`}>
+                                     Score: {activeLogPatient.currentScore}
+                                   </p>
+                                 </div>
+                               )}
+                             </div>
+
+                             <form onSubmit={submitClinicalLog} className="space-y-4">
+                               <div>
+                                 <label className="block text-sm font-bold text-gray-700 mb-1">New Clinical Action / Location</label>
+                                 <select required value={logForm.stage} onChange={e => setLogForm({...logForm, stage: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white">
+                                   <option value="">Select action...</option>
+                                   {STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                                 </select>
+                               </div>
+                               
+                               <div className="bg-white border border-gray-200 rounded-lg p-3">
+                                 <div className="flex justify-between items-center mb-2">
+                                   <label className="block text-sm font-bold text-gray-700">Update Acuity Score</label>
+                                   <button
+                                     type="button"
+                                     onClick={() => { setShowCalculator(!showCalculator); setCalcStep(0); }}
+                                     className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded font-semibold hover:bg-indigo-100 transition border border-indigo-200"
+                                   >
+                                     {showCalculator ? "Cancel Calculator" : "Open Acuity Calculator"}
+                                   </button>
+                                 </div>
+
+                                 {showCalculator ? (
+                                   <div className="mt-3 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100 shadow-inner">
+                                     <div className="flex justify-between items-center mb-4">
+                                       <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider">
+                                         Step {calcStep + 1} of 11
+                                       </span>
+                                       <h4 className="font-bold text-gray-800 text-sm">{ACUITY_CRITERIA[calcStep].name}</h4>
+                                     </div>
+                                     
+                                     <div className="space-y-3">
+                                       {ACUITY_CRITERIA[calcStep].options.map((opt, i) => {
+                                         const isSelected = acuitySelections[calcStep] === i + 1;
+                                         return (
+                                           <button
+                                             key={i}
+                                             type="button"
+                                             onClick={() => {
+                                               const newSelections = [...acuitySelections];
+                                               newSelections[calcStep] = i + 1;
+                                               setAcuitySelections(newSelections);
+                                             }}
+                                             className={`w-full text-left flex flex-col rounded-lg border transition-all overflow-hidden ${
+                                               isSelected ? 'border-indigo-600 shadow-md ring-1 ring-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-indigo-50'
+                                             }`}
+                                           >
+                                             <div className={`w-full p-3 ${isSelected ? 'bg-indigo-600 text-white' : ''}`}>
+                                               <span className="font-bold mr-2 opacity-80">[{i + 1} pt]</span> {opt.text}
+                                             </div>
+                                             {isSelected && (
+                                               <div className="w-full p-3 bg-indigo-50 text-sm text-indigo-900 border-t border-indigo-200">
+                                                 <strong className="block text-[10px] uppercase tracking-wider text-indigo-600 mb-1">Details:</strong>
+                                                 {opt.desc}
+                                               </div>
+                                             )}
+                                           </button>
+                                         );
+                                       })}
+                                     </div>
+
+                                     <div className="flex justify-between mt-6 pt-4 border-t border-indigo-200">
+                                       <button
+                                         type="button"
+                                         disabled={calcStep === 0}
+                                         onClick={() => setCalcStep(calcStep - 1)}
+                                         className={`px-4 py-2 rounded-md text-sm font-bold transition ${
+                                           calcStep === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200'
+                                         }`}
+                                       >
+                                         &larr; Back
+                                       </button>
+                                       <button
+                                         type="button"
+                                         onClick={() => {
+                                           if (calcStep < 10) setCalcStep(calcStep + 1);
+                                           else setShowCalculator(false);
+                                         }}
+                                         className="px-6 py-2 rounded-md text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shadow-md flex items-center"
+                                       >
+                                         {calcStep === 10 ? 'Finish' : 'Choose'} <ArrowRight className="w-4 h-4 ml-1.5" />
+                                       </button>
+                                     </div>
+                                   </div>
+                                 ) : (
+                                   <input type="number" min="1" max="50" required value={logForm.score} onChange={e => setLogForm({...logForm, score: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none text-lg font-semibold" placeholder="Enter score manually..." />
+                                 )}
+
+                                 {logForm.score && (
+                                   <div className={`mt-3 p-2 rounded-md border ${getAcuityDetails(logForm.score).bg} border-opacity-50 flex justify-center items-center`}>
+                                     <p className={`text-sm font-bold ${getAcuityDetails(logForm.score).text}`}>
+                                       Total Score: {logForm.score} <span className="opacity-50 px-1">|</span> {getAcuityDetails(logForm.score).category}
+                                     </p>
+                                   </div>
+                                 )}
+                               </div>
+
+                               <div>
+                                 <label className="block text-sm font-bold text-gray-700 mb-1">Additional Details (Optional)</label>
+                                 <input type="text" value={logForm.details} onChange={e => setLogForm({...logForm, details: e.target.value})} placeholder="e.g. Red Zone, Medical Team 1, Ward 5B..." className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                               </div>
+
+                               <div className="pt-4">
+                                 <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-md transition shadow-md flex items-center justify-center text-lg">
+                                   <CheckCircle className="w-5 h-5 mr-2" /> Submit Clinical Log
+                                 </button>
+                                 <p className="text-center text-xs text-gray-400 mt-3">Logged securely by Staff ID: {staffId}</p>
+                               </div>
+                             </form>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {view === 'register' && (
+                    <div className="max-w-md mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md border border-gray-200">
+                      <div className="flex items-center mb-6 border-b pb-4">
+                        <div className="bg-indigo-100 p-3 rounded-full mr-4 text-indigo-700">
+                          <Users className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-bold text-gray-800">New Patient Registration</h2>
+                          <p className="text-sm text-gray-500">Unit Hasil / Triage Intake</p>
+                        </div>
+                      </div>
+
+                      {!generatedQR && (
+                        <div className="bg-blue-50 border border-blue-200 text-blue-800 text-xs p-3 rounded-md mb-6 flex items-start">
+                          <ScanLine className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
+                          <p><strong>Mobile User Tip:</strong> Tap the Name or IC field, then select the <strong>"Scan Text"</strong> icon on your keyboard to read the MyKad instantly using your camera.</p>
+                        </div>
+                      )}
+
+                      <div className="space-y-4">
+                        {!generatedQR ? (
+                          <form onSubmit={handleRegister} className="space-y-4">
+                            <div>
+                              <label className="block text-sm font-bold text-gray-700 mb-1">Full Name</label>
+                              <input type="text" required value={newPatient.name} onChange={e => setNewPatient({...newPatient, name: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Tap to type or scan MyKad..." />
+                            </div>
+                            
+                            <div>
+                              <label className="block text-sm font-bold text-gray-700 mb-1">IC Number</label>
+                              <input type="text" required value={newPatient.ic} onChange={handleIcChange} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono" placeholder="e.g. 800101-10-1234" />
+                              <p className="text-[10px] text-gray-400 mt-1">Age and Gender auto-calculate when 12 digits are entered.</p>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Age</label>
+                                <input type="number" required value={newPatient.age} onChange={e => setNewPatient({...newPatient, age: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-gray-50" placeholder="Auto-filled" />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Gender</label>
+                                <select required value={newPatient.gender} onChange={e => setNewPatient({...newPatient, gender: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-gray-50">
+                                  <option value="">Select...</option>
+                                  <option value="Male">Male</option>
+                                  <option value="Female">Female</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-sm font-bold text-gray-700 mb-1">Race</label>
+                              <select required value={newPatient.race} onChange={e => setNewPatient({...newPatient, race: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                                <option value="">Select...</option>
+                                <option value="Malay">Malay</option>
+                                <option value="Chinese">Chinese</option>
+                                <option value="Indian">Indian</option>
+                                <option value="Other">Other</option>
+                              </select>
+                            </div>
+
+                            <div className="pt-2">
+                              <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 rounded-md transition shadow-sm">Generate Patient QR Code</button>
+                            </div>
+                          </form>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center py-6">
+                            <div className="bg-gray-50 p-6 rounded-xl border-2 border-dashed border-gray-300 flex flex-col items-center text-center">
+                               <img src={generatedQR} alt="Patient QR" className="w-48 h-48 mb-4 rounded-md shadow-sm bg-white p-2" />
+                               <h3 className="text-xl font-bold text-gray-900">{newPatient.name}</h3>
+                               <p className="text-sm text-gray-500 font-mono mt-1">IC: {newPatient.ic} | Age: {newPatient.age} | {newPatient.gender} | {newPatient.race}</p>
+                               <p className="text-xs text-gray-400 mt-2">Registered: {new Date().toLocaleString()}</p>
+                            </div>
+                            <div className="flex space-x-4 mt-6 w-full max-w-sm">
+                               <button onClick={() => window.print()} className="flex-1 bg-gray-800 text-white py-2 rounded-md font-medium hover:bg-gray-900 transition">Print QR Band</button>
+                               <button onClick={() => {setGeneratedQR(null); setNewPatient({name:'', ic:'', age:'', race:'', gender:''});}} className="flex-1 bg-indigo-100 text-indigo-700 py-2 rounded-md font-medium hover:bg-indigo-200 transition">Register Next</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {view === 'dashboard' && (
+                    <div className="space-y-6">
+                      {wardBeds.total - wardBeds.occupied < patients.filter(p => p.currentStage === 'Decision to Admit').length && (
+                         <div className="bg-red-50 border border-red-200 p-4 rounded-md flex items-start shadow-sm">
+                           <AlertCircle className="w-6 h-6 text-red-500 mr-3 mt-0.5" />
+                           <div>
+                             <h3 className="text-red-800 font-bold">Bed Management Alert</h3>
+                             <p className="text-red-700 text-sm mt-1">Pending admissions exceed available beds. Urgent escalation required.</p>
+                           </div>
+                         </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 flex items-center space-x-4">
+                           <div className="p-3 bg-gray-50 rounded-lg"><Activity className="text-blue-500 w-6 h-6" /></div>
+                           <div>
+                             <div className="text-xs text-gray-500 font-bold uppercase tracking-wider">Total ED Active</div>
+                             <div className="text-2xl font-bold text-gray-900 leading-tight">
+                               {patients.filter(p => p.currentStage !== 'Discharged' && p.currentStage !== 'Ward Arrival' && p.currentStage !== 'Ward Update (Acuity/Daily)' && p.currentStage !== 'Decision to Admit').length}
+                             </div>
+                           </div>
+                         </div>
+                         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 flex items-center space-x-4">
+                           <div className="p-3 bg-gray-50 rounded-lg"><Users className="text-indigo-500 w-6 h-6" /></div>
+                           <div>
+                             <div className="text-xs text-gray-500 font-bold uppercase tracking-wider">Pending DTA</div>
+                             <div className="text-2xl font-bold text-gray-900 leading-tight">
+                               {patients.filter(p => p.currentStage === 'Decision to Admit').length}
+                             </div>
+                           </div>
+                         </div>
+                         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 flex items-center space-x-4">
+                           <div className="p-3 bg-gray-50 rounded-lg"><Bed className="text-orange-500 w-6 h-6" /></div>
+                           <div>
+                             <div className="text-xs text-gray-500 font-bold uppercase tracking-wider">Ward Occupancy</div>
+                             <div className="text-2xl font-bold text-gray-900 leading-tight">{wardBeds.occupied} / {wardBeds.total}</div>
+                           </div>
+                         </div>
+                         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 flex items-center space-x-4">
+                           <div className="p-3 bg-gray-50 rounded-lg"><AlertCircle className="text-red-500 w-6 h-6" /></div>
+                           <div>
+                             <div className="text-xs text-gray-500 font-bold uppercase tracking-wider">High-Risk Overall</div>
+                             <div className="text-2xl font-bold text-gray-900 leading-tight">
+                               {patients.filter(p => p.currentStage !== 'Discharged' && p.currentScore >= 34).length}
+                             </div>
+                           </div>
+                         </div>
+                      </div>
+
+                      <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
+                         <h3 className="font-bold text-gray-800 mb-4 border-b pb-2">Pending Admissions (DTA) Prioritization</h3>
+                         <div className="overflow-x-auto">
+                           <table className="w-full text-left text-sm">
+                             <thead>
+                               <tr className="text-gray-500 bg-gray-50 border-y border-gray-100">
+                                 <th className="py-3 px-3 font-semibold">Patient</th>
+                                 <th className="py-3 px-3 font-semibold">Wait Time</th>
+                                 <th className="py-3 px-3 font-semibold">Acuity Status</th>
+                               </tr>
+                             </thead>
+                             <tbody>
+                               {patients.filter(p => p.currentStage === 'Decision to Admit').sort((a, b) => b.currentScore - a.currentScore).map(p => {
+                                 const ac = getAcuityDetails(p.currentScore);
+                                 const dtaTime = new Date(p.history.find(h => h.stage === 'Decision to Admit')?.timestamp || Date.now());
+                                 const waitMins = Math.floor((currentTime - dtaTime.getTime()) / 60000);
+                                 return (
+                                   <tr key={p.ic} className="border-b last:border-0 hover:bg-gray-50 transition">
+                                     <td className="py-3 px-3">
+                                       <div className="font-bold text-gray-900">{p.name}</div>
+                                       <div className="text-xs text-gray-500 font-mono mt-0.5">{p.ic}</div>
+                                     </td>
+                                     <td className="py-3 px-3 text-gray-600">
+                                       <div className="flex items-center"><Clock className="w-3 h-3 mr-1 text-gray-400" /> {waitMins} mins</div>
+                                     </td>
+                                     <td className="py-3 px-3">
+                                       <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${ac.bg} ${ac.text}`}>
+                                         {ac.category} ({p.currentScore})
+                                       </span>
+                                     </td>
+                                   </tr>
+                                 )
+                               })}
+                               {patients.filter(p => p.currentStage === 'Decision to Admit').length === 0 && (
+                                 <tr><td colSpan="3" className="py-8 text-center text-gray-400 font-medium">All clear! No patients waiting for beds.</td></tr>
+                               )}
+                             </tbody>
+                           </table>
+                         </div>
+                      </div>
+
+                      <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
+                         <h3 className="font-bold text-gray-800 mb-4 border-b pb-2">Active Patients by Clinical Stage</h3>
+                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                           {STAGES.filter(stage => stage !== 'Discharged').map(stage => {
+                             const stagePatients = patients.filter(p => p.currentStage === stage && p.currentStage !== 'Discharged');
+                             return (
+                               <div key={stage} className="bg-gray-50 p-3 rounded-lg border border-gray-100 flex flex-col h-full">
+                                 <h4 className="font-semibold text-gray-700 text-sm mb-3 flex justify-between items-center border-b border-gray-200 pb-2">
+                                   {stage}
+                                   <span className="bg-indigo-100 text-indigo-700 font-bold py-0.5 px-2 rounded-full text-xs shadow-sm">
+                                     {stagePatients.length}
+                                   </span>
+                                 </h4>
+                                 <div className="space-y-2 flex-1">
+                                   {stagePatients.length > 0 ? stagePatients.map(p => {
+                                     const ac = getAcuityDetails(p.currentScore);
+                                     return (
+                                       <div key={p.ic} className="bg-white p-2.5 rounded border border-gray-200 shadow-sm text-xs hover:shadow-md transition">
+                                         <div className="font-bold text-gray-800">{p.name}</div>
+                                         <div className="text-gray-500 font-mono mt-0.5">{p.ic}</div>
+                                         {p.currentScore && (
+                                           <div className={`mt-2 inline-block px-1.5 py-0.5 rounded text-[9px] uppercase font-bold tracking-wider ${ac.bg} ${ac.text}`}>
+                                             {ac.category}: {p.currentScore}
+                                           </div>
+                                         )}
+                                       </div>
+                                     )
+                                   }) : (
+                                     <div className="text-xs text-gray-400 italic text-center py-4 border-2 border-dashed border-gray-200 rounded-md bg-gray-50/50">
+                                       No patients at this stage
+                                     </div>
+                                   )}
+                                 </div>
+                               </div>
+                             );
+                           })}
+                         </div>
+                      </div>
+                    </div>
+                  )}
+                </main>
+              </>
+            )}
+          </div>
+        );
+      }
+
+      // Mounting Application
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
